@@ -3,7 +3,8 @@ import io
 import cv2
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, HTTPException
+import os
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
@@ -24,17 +25,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Глобальная переменная для хранения модели
-model = None
+# Глобальные переменные для хранения моделей
+models = {}
 
-def load_model():
-    """Загрузка модели при первом обращении"""
-    global model
-    if model is None:
-        model = tf.keras.models.load_model('best_model_float16.h5', compile=False)
-    return model
+def load_model(model_path):
+    """Загрузка модели по пути (определяет тип модели по расширению файла)"""
+    global models
+    
+    if model_path in models:
+        return models[model_path]
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Файл модели не найден: {model_path}")
+    
+    # Определяем тип модели по расширению файла
+    if model_path.endswith('.tflite'):
+        # Загружаем TFLite модель
+        interpreter = tf.lite.Interpreter(model_path=model_path)
+        # Выделяем память для тензоров
+        interpreter.allocate_tensors()
+        models[model_path] = interpreter
+        return interpreter
+    else:  # .h5, .keras, и т.д.
+        # Загружаем TensorFlow модель
+        model = tf.keras.models.load_model(model_path, compile=False)
+        models[model_path] = model
+        return model
 
-def predict_img_with_smooth_windowing(input_img, window_size, subdivisions, nb_classes, pred_func):
+def is_tflite_model(model):
+    """Проверяет, является ли модель TFLite интерпретатором"""
+    return isinstance(model, tf.lite.Interpreter)
+
+def predict_with_model(model, image_batch):
+    """Выполнение предсказания с использованием модели (TF или TFLite)"""
+    if is_tflite_model(model):
+        # Получаем информацию о входном/выходном тензорах
+        input_details = model.get_input_details()[0]
+        output_details = model.get_output_details()[0]
+        
+        # Получаем форму выхода
+        output_shape = output_details['shape']
+        
+        # Подготавливаем результирующий массив для предсказаний
+        batch_size = len(image_batch)
+        results = np.zeros((batch_size, output_shape[1], output_shape[2], output_shape[3]), dtype=np.float32)
+        
+        # Обрабатываем каждое изображение в батче отдельно
+        for i, img in enumerate(image_batch):
+            # Устанавливаем данные входного тензора
+            model.set_tensor(input_details['index'], np.expand_dims(img, axis=0).astype(np.float32))
+            
+            # Выполняем инференс
+            model.invoke()
+            
+            # Получаем выходной тензор
+            output_data = model.get_tensor(output_details['index'])
+            
+            # Сохраняем результат
+            results[i] = output_data[0]
+        
+        return results
+    else:
+        # Обычная TensorFlow модель
+        return model.predict(image_batch, verbose=0)
+
+def predict_img_with_smooth_windowing(input_img, window_size, subdivisions, nb_classes, model):
     """
     Предсказание полноразмерной маски с плавными переходами без краевых эффектов
     
@@ -142,7 +197,7 @@ def predict_img_with_smooth_windowing(input_img, window_size, subdivisions, nb_c
         
         # Пакетное предсказание для всех патчей
         patches_array = np.array(patches)
-        predictions = pred_func(patches_array)
+        predictions = predict_with_model(model, patches_array)
         
         # Применяем окно к каждому предсказанию и накладываем в результат
         for idx, (y, x) in enumerate(coords):
@@ -206,18 +261,34 @@ def label_to_rgb(predicted_image):
 
 @app.on_event("startup")
 async def startup_event():
-    """Загружаем модель при запуске сервера"""
-    load_model()
-    print("Модель успешно загружена")
+    """Загружаем модели при запуске сервера"""
+    try:
+        # Пробуем загрузить TensorFlow модель
+        load_model('best_model_float16.h5')
+        print("TensorFlow модель успешно загружена")
+    except Exception as e:
+        print(f"Ошибка загрузки TensorFlow модели: {str(e)}")
+    
+    try:
+        # Пробуем загрузить TFLite модель
+        load_model('best_model.tflite')
+        print("TFLite модель успешно загружена")
+    except Exception as e:
+        print(f"Ошибка загрузки TFLite модели: {str(e)}")
 
 @app.get("/")
 def read_root():
     """Корневой эндпоинт для проверки работоспособности"""
     return {"сообщение": "API модели сегментации работает"}
 
+@app.get("/models")
+def list_available_models():
+    """Получение списка доступных моделей"""
+    return {"available_models": list(models.keys())}
+
 @app.post("/predict/")
-async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisions: int = 2):
-    """Эндпоинт для предсказания сегментации по изображению"""
+async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisions: int = 2, model_path: str = "best_model_float16.h5"):
+    """Эндпоинт для предсказания маски по изображению"""
     try:
         # Чтение и обработка изображения
         contents = await file.read()
@@ -228,8 +299,14 @@ async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisi
         scaler = MinMaxScaler()
         input_img = scaler.fit_transform(img.reshape(-1, img.shape[-1])).reshape(img.shape)
         
-        # Получение модели
-        model = load_model()
+        # Загружаем нужную модель
+        try:
+            model = load_model(model_path)
+        except FileNotFoundError:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"Модель не найдена: {model_path}"}
+            )
         
         # Количество классов
         n_classes = 6
@@ -240,7 +317,7 @@ async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisi
             window_size=patch_size,
             subdivisions=subdivisions,
             nb_classes=n_classes,
-            pred_func=(lambda img_batch: model.predict(img_batch, verbose=0))
+            model=model
         )
         
         # Получение итогового предсказания
