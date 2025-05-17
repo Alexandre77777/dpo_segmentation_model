@@ -16,7 +16,7 @@ st.set_page_config(
 st.title("Сегментация спутниковых снимков")
 
 # URL бэкенда
-BACKEND_URL = "http://localhost:8080"  # Замените на ваш URL после деплоя на render.com
+BACKEND_URL = "https://dpo-segmentation-model.onrender.com"  # Замените на ваш URL после деплоя на render.com
 
 def get_image_download_link(img, filename, text):
     """Создает ссылку для скачивания изображения"""
