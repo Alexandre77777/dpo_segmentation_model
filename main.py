@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 import uvicorn
 import os
+import gc
+import traceback
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +14,10 @@ from starlette.responses import StreamingResponse
 import tensorflow as tf
 import segmentation_models as sm
 from sklearn.preprocessing import MinMaxScaler
+
+# Отключаем все экспериментальные делегаты
+os.environ["TFLITE_DISABLE_DELEGATE_CLUSTERING"] = "1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 # Инициализация FastAPI приложения
 app = FastAPI(title="API модели сегментации")
@@ -28,6 +34,12 @@ app.add_middleware(
 # Глобальные переменные для хранения моделей
 models = {}
 
+def get_available_memory_mb(default_mb=400):
+    """Определяет доступную память в МБ - упрощенная версия без чтения proc"""
+    # Возвращаем фиксированное значение для надежности
+    return default_mb
+
+
 def load_model(model_path):
     """Загрузка модели по пути (определяет тип модели по расширению файла)"""
     global models
@@ -40,24 +52,32 @@ def load_model(model_path):
     
     # Определяем тип модели по расширению файла
     if model_path.endswith('.tflite'):
-        # Загружаем TFLite модель
-        interpreter = tf.lite.Interpreter(model_path=model_path)
-        # Выделяем память для тензоров
-        interpreter.allocate_tensors()
-        models[model_path] = interpreter
-        return interpreter
+        try:
+            # Загружаем TFLite модель без экспериментальных делегатов
+            interpreter = tf.lite.Interpreter(
+                model_path=model_path,
+                num_threads=1
+            )
+            interpreter.allocate_tensors()
+            models[model_path] = interpreter
+            return interpreter
+        except Exception as e:
+            print(f"Ошибка загрузки TFLite модели: {str(e)}")
+            raise
     else:  # .h5, .keras, и т.д.
         # Загружаем TensorFlow модель
         model = tf.keras.models.load_model(model_path, compile=False)
         models[model_path] = model
         return model
 
+
 def is_tflite_model(model):
     """Проверяет, является ли модель TFLite интерпретатором"""
     return isinstance(model, tf.lite.Interpreter)
 
+
 def predict_with_model(model, image_batch):
-    """Выполнение предсказания с использованием модели (TF или TFLite)"""
+    """Выполнение предсказания с базовыми настройками без оптимизации"""
     if is_tflite_model(model):
         # Получаем информацию о входном/выходном тензорах
         input_details = model.get_input_details()[0]
@@ -89,140 +109,70 @@ def predict_with_model(model, image_batch):
         # Обычная TensorFlow модель
         return model.predict(image_batch, verbose=0)
 
+
 def predict_img_with_smooth_windowing(input_img, window_size, subdivisions, nb_classes, model):
     """
-    Предсказание полноразмерной маски с плавными переходами без краевых эффектов
-    
-    Оригинальный код: https://github.com/Vooban/Smoothly-Blend-Image-Patches
-    MIT License, Copyright (c) 2017 Vooban Inc. (Guillaume Chevalier)
-    Оптимизировано для ускорения и уменьшения потребления памяти
+    Предсказание с плавными переходами - возвращает к базовой версии, 
+    которая раньше работала
     """
-    # Кеширование окон для ускорения
-    window_cache = {}
-    
-    def get_window():
-        """Создаёт или возвращает кешированное 2D окно для сглаживания"""
-        key = f"{window_size}"
-        if key in window_cache:
-            return window_cache[key]
-            
-        # Создаём треугольную функцию
-        n = np.arange(1, window_size + 1)
-        half_point = (window_size + 1) // 2
-        w = np.zeros(window_size)
-        w[:half_point] = 2 * n[:half_point] / (window_size + 1)
-        w[half_point:] = 2 - 2 * n[half_point:] / (window_size + 1)
-        
-        # Создаём сплайновую оконную функцию
-        intersection = window_size // 4
-        wind_outer = (abs(2*w)**2) / 2
-        wind_outer[intersection:-intersection] = 0
-        
-        wind_inner = 1 - (abs(2*(w-1))**2) / 2
-        wind_inner[:intersection] = 0
-        wind_inner[-intersection:] = 0
-        
-        # Комбинируем и нормализуем
-        wind = (wind_inner + wind_outer) / np.mean(wind_inner + wind_outer)
-        
-        # Создаём 2D окно через внешнее произведение
-        window_2d = wind.reshape(-1, 1) @ wind.reshape(1, -1)
-        window_2d = window_2d[:, :, np.newaxis]
-        
-        window_cache[key] = window_2d
-        return window_2d
-    
-    # Получаем окно
-    window = get_window()
-    
     # Расчёт параметров дополнения и шага
     pad = int(round(window_size * (1 - 1.0/subdivisions)))
     step = window_size // subdivisions
     
-    # Функции для создания поворотов и отражений
-    def create_variants(img):
-        """Создаёт 8 вариантов изображения (повороты и отражения)"""
-        variants = []
-        # Добавляем оригинал и повороты
-        variants.append(img)
-        variants.append(np.rot90(img, k=1, axes=(0, 1)))
-        variants.append(np.rot90(img, k=2, axes=(0, 1)))
-        variants.append(np.rot90(img, k=3, axes=(0, 1)))
-        # Добавляем отражение и его повороты
-        img_flipped = img[:, ::-1].copy()
-        variants.append(img_flipped)
-        variants.append(np.rot90(img_flipped, k=1, axes=(0, 1)))
-        variants.append(np.rot90(img_flipped, k=2, axes=(0, 1)))
-        variants.append(np.rot90(img_flipped, k=3, axes=(0, 1)))
-        return variants
-    
-    def merge_variants(variants):
-        """Объединяет результаты 8 вариантов, возвращая их в исходное положение"""
-        merged = []
-        merged.append(variants[0])
-        merged.append(np.rot90(variants[1], k=3, axes=(0, 1)))
-        merged.append(np.rot90(variants[2], k=2, axes=(0, 1)))
-        merged.append(np.rot90(variants[3], k=1, axes=(0, 1)))
-        merged.append(variants[4][:, ::-1])
-        merged.append(np.rot90(variants[5], k=3, axes=(0, 1))[:, ::-1])
-        merged.append(np.rot90(variants[6], k=2, axes=(0, 1))[:, ::-1])
-        merged.append(np.rot90(variants[7], k=1, axes=(0, 1))[:, ::-1])
-        return np.mean(merged, axis=0)
-    
     # Дополняем изображение отражением по краям
     padded = np.pad(input_img, ((pad, pad), (pad, pad), (0, 0)), mode='reflect')
+    h, w = padded.shape[:2]
     
-    # Создаём все варианты изображения (8 вариантов с поворотами/отражениями)
-    padded_variants = create_variants(padded)
+    # Создаём массив для результата и счётчик наложений
+    result = np.zeros((h, w, nb_classes), dtype=np.float32)
+    counts = np.zeros((h, w, 1), dtype=np.float32)
     
-    # Обрабатываем каждый вариант
-    results = []
-    for variant in padded_variants:
-        h, w = variant.shape[:2]
+    # Создаём весовую функцию для перекрытия окон
+    y, x = np.mgrid[0:window_size, 0:window_size]
+    center = window_size // 2
+    dist_from_center = np.sqrt(((x - center) / center) ** 2 + ((y - center) / center) ** 2)
+    window = np.clip(1 - dist_from_center, 0, 1)[:, :, np.newaxis]
+    
+    # Собираем патчи для пакетного предсказания
+    patches = []
+    coords = []
+    
+    # Итерация по патчам с шагом
+    for y_start in range(0, h - window_size + 1, step):
+        for x_start in range(0, w - window_size + 1, step):
+            patch = padded[y_start:y_start+window_size, x_start:x_start+window_size]
+            patches.append(patch)
+            coords.append((y_start, x_start))
+    
+    # Разбиваем на более мелкие батчи для обработки
+    batch_size = 4  # Используем небольшой размер для надежности
+    for i in range(0, len(patches), batch_size):
+        batch_patches = np.array(patches[i:i+batch_size])
+        batch_coords = coords[i:i+batch_size]
         
-        # Создаём массив для результата и счётчик наложений
-        result = np.zeros((h, w, nb_classes), dtype=np.float32)
-        counts = np.zeros((h, w, 1), dtype=np.float32)
-        
-        # Собираем патчи для пакетного предсказания
-        patches = []
-        coords = []
-        
-        # Итерация по патчам с шагом
-        for y in range(0, h - window_size + 1, step):
-            for x in range(0, w - window_size + 1, step):
-                patch = variant[y:y+window_size, x:x+window_size]
-                patches.append(patch)
-                coords.append((y, x))
-        
-        # Пакетное предсказание для всех патчей
-        patches_array = np.array(patches)
-        predictions = predict_with_model(model, patches_array)
+        # Пакетное предсказание для текущего батча
+        predictions = predict_with_model(model, batch_patches)
         
         # Применяем окно к каждому предсказанию и накладываем в результат
-        for idx, (y, x) in enumerate(coords):
-            weighted_pred = predictions[idx] * window
+        for j, (y, x) in enumerate(batch_coords):
+            weighted_pred = predictions[j] * window
             result[y:y+window_size, x:x+window_size] += weighted_pred
             counts[y:y+window_size, x:x+window_size] += window
-        
-        # Нормализуем по количеству наложений
-        result = np.divide(result, counts + 1e-8, out=result, where=counts > 0)
-        
-        # Обрезаем до исходного размера (без дополнения)
-        results.append(result[pad:-pad, pad:-pad])
     
-    # Объединяем все варианты и устраняем повороты/отражения
-    merged_result = merge_variants(results)
+    # Нормализуем по количеству наложений
+    mask = counts > 0
+    result = np.divide(result, counts, out=result, where=mask)
     
-    # Обрезаем по размеру исходного изображения
-    return merged_result[:input_img.shape[0], :input_img.shape[1]]
+    # Обрезаем до исходного размера
+    return result[pad:-pad, pad:-pad]
+
 
 def label_to_rgb(predicted_image):
     """Преобразование меток классов в RGB изображение"""
     # Здание
     Building = '#3C1098'.lstrip('#')
     Building = np.array(tuple(int(Building[i:i+2], 16) for i in (0, 2, 4)))
-
+    
     # Земля
     Land = '#8429F6'.lstrip('#')
     Land = np.array(tuple(int(Land[i:i+2], 16) for i in (0, 2, 4)))
@@ -243,7 +193,7 @@ def label_to_rgb(predicted_image):
     Unlabeled = '#9B9B9B'.lstrip('#')
     Unlabeled = np.array(tuple(int(Unlabeled[i:i+2], 16) for i in (0, 2, 4)))
 
-    # Создание пустого изображения с тремя каналами (RGB)
+    # Создание изображения с тремя каналами (RGB)
     segmented_img = np.empty((predicted_image.shape[0], predicted_image.shape[1], 3))
 
     # Заполнение изображения соответствующими цветами в зависимости от меток классов
@@ -259,58 +209,92 @@ def label_to_rgb(predicted_image):
 
     return segmented_img
 
-@app.on_event("startup")
-async def startup_event():
-    """Загружаем модели при запуске сервера"""
-    try:
-        # Пробуем загрузить TensorFlow модель
-        load_model('best_model_float16.h5')
-        print("TensorFlow модель успешно загружена")
-    except Exception as e:
-        print(f"Ошибка загрузки TensorFlow модели: {str(e)}")
+
+def convert_h5_to_optimized_tflite(h5_model_path, tflite_output_path):
+    """Конвертирует H5 модель в оптимизированный TFLite формат с приоритетом на уменьшение размера"""
+    # Загружаем модель
+    model = tf.keras.models.load_model(h5_model_path, compile=False)
     
-    try:
-        # Пробуем загрузить TFLite модель
-        load_model('best_model.tflite')
-        print("TFLite модель успешно загружена")
-    except Exception as e:
-        print(f"Ошибка загрузки TFLite модели: {str(e)}")
+    # Создаем конвертер и настраиваем оптимизации
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter.optimizations = [tf.lite.Optimize.OPTIMIZE_FOR_SIZE]
+    converter.target_spec.supported_types = [tf.float16]
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
+    converter.allow_custom_ops = True
+    
+    # Конвертируем и сохраняем модель
+    tflite_model = converter.convert()
+    with open(tflite_output_path, 'wb') as f:
+        f.write(tflite_model)
+    
+    # Выводим информацию о размерах
+    original_size = os.path.getsize(h5_model_path) / (1024*1024)
+    tflite_size = os.path.getsize(tflite_output_path) / (1024*1024)
+    print(f"Исходный размер: {original_size:.2f} МБ")
+    print(f"TFLite размер: {tflite_size:.2f} МБ")
+    print(f"Коэффициент сжатия: {original_size/tflite_size:.2f}x")
+
 
 @app.get("/")
 def read_root():
     """Корневой эндпоинт для проверки работоспособности"""
     return {"сообщение": "API модели сегментации работает"}
 
+
 @app.get("/models")
 def list_available_models():
     """Получение списка доступных моделей"""
     return {"available_models": list(models.keys())}
 
+
 @app.post("/predict/")
-async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisions: int = 2, model_path: str = "best_model_float16.h5"):
+async def predict(file: UploadFile = File(...), 
+                patch_size: int = 256, 
+                subdivisions: int = 2, 
+                model_path: str = "best_model_float16.h5"):
     """Эндпоинт для предсказания маски по изображению"""
     try:
+        # Добавляем логирование для отладки
+        print(f"Получен запрос с patch_size={patch_size}, subdivisions={subdivisions}, model_path={model_path}")
+        
         # Чтение и обработка изображения
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
+        print(f"Изображение загружено, размер: {img.shape}")
+        
         # Нормализация изображения
-        scaler = MinMaxScaler()
-        input_img = scaler.fit_transform(img.reshape(-1, img.shape[-1])).reshape(img.shape)
+        input_img = img.astype(np.float32) / 255.0
         
         # Загружаем нужную модель
         try:
             model = load_model(model_path)
-        except FileNotFoundError:
-            return JSONResponse(
-                status_code=400,
-                content={"detail": f"Модель не найдена: {model_path}"}
-            )
+            print(f"Модель {model_path} загружена успешно")
+        except FileNotFoundError as e:
+            print(f"Ошибка загрузки модели: {str(e)}")
+            # Пробуем запасную модель
+            if model_path != "best_model_float16.h5" and os.path.exists("best_model_float16.h5"):
+                print("Пробуем запасную модель best_model_float16.h5")
+                model = load_model("best_model_float16.h5")
+            else:
+                print("Запасная модель не найдена")
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": f"Модель не найдена: {model_path}"}
+                )
+        
+        # Ограничиваем размеры входного изображения для безопасности
+        if max(img.shape[:2]) > 1024:
+            print("Уменьшаем размер изображения до максимум 1024 px для безопасности")
+            scale = 1024 / max(img.shape[:2])
+            new_size = (int(img.shape[1] * scale), int(img.shape[0] * scale))
+            input_img = cv2.resize(input_img, new_size)
         
         # Количество классов
         n_classes = 6
         
+        print(f"Начинаем предсказание с окном {patch_size}px и {subdivisions} subdivisions")
         # Предсказание с плавными переходами
         predictions_smooth = predict_img_with_smooth_windowing(
             input_img,
@@ -320,19 +304,25 @@ async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisi
             model=model
         )
         
+        print("Предсказание получено, выполняем argmax")
         # Получение итогового предсказания
         final_prediction = np.argmax(predictions_smooth, axis=2)
         
+        print("Преобразуем в RGB")
         # Преобразование в RGB
         prediction_rgb = label_to_rgb(final_prediction)
         
+        print("Готовим изображение для отправки")
         # Конвертация в изображение и затем в байты
         result_img = Image.fromarray(prediction_rgb)
         img_byte_arr = io.BytesIO()
         result_img.save(img_byte_arr, format='PNG')
         img_byte_arr.seek(0)
         
+        print("Отправляем ответ")
         return StreamingResponse(img_byte_arr, media_type="image/png")
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка обработки изображения: {str(e)}")
+        print(f"Ошибка в обработке: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Ошибка обработки: {str(e)}")
