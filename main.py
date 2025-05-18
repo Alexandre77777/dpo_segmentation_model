@@ -34,7 +34,7 @@ app.add_middleware(
 # Глобальные переменные для хранения моделей
 models = {}
 
-def get_available_memory_mb(default_mb=400):
+def get_available_memory_mb(default_mb=300):
     """Определяет доступную память в МБ - упрощенная версия без чтения proc"""
     # Возвращаем фиксированное значение для надежности
     return default_mb
