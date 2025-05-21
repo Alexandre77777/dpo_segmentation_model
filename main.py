@@ -52,7 +52,7 @@ def predict_h5_model(img_path):
     
     try:
         # Загружаем H5 модель
-        h5_model = tf.keras.models.load_model('best_model_float16.h5', compile=False)
+        h5_model = tf.keras.models.load_model('best_model.h5', compile=False)
         
         # Читаем изображение
         img = cv2.imread(img_path)
