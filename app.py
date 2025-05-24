@@ -5,7 +5,6 @@ from PIL import Image
 import io
 import base64
 import numpy as np
-import cv2
 
 st.set_page_config(
     page_title="Сегментация спутниковых снимков",
