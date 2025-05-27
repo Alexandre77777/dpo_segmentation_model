@@ -11,6 +11,12 @@ from PIL import Image
 from starlette.responses import StreamingResponse
 import tensorflow as tf
 
+# Устанавливаем переменную окружения
+os.environ['SM_FRAMEWORK'] = 'tf.keras'
+
+# Импортируем segmentation_models
+import segmentation_models as sm
+
 # Инициализация FastAPI приложения
 app = FastAPI(title="API модели сегментации")
 
@@ -23,47 +29,124 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Задаем архитектуру сети и получаем функцию предобработки
+BACKBONE = 'efficientnetb1'
+preprocess_input = sm.get_preprocessing(BACKBONE)
+
 # Глобальные переменные для хранения модели
 model = None
-is_saved_model = False
+model_type = None  # "tf" или "tflite"
 predictor_function = None
+
+# Глобальные переменные для TFLite - инициализируются один раз
+_interpreter = None
+_input_det = None
+_output_det = None
+_scale_in = None
+_zp_in = None
+_scale_out = None
+_zp_out = None
+_input_shape = None
 
 def load_model_generic(path):
     """
-    Загружает .h5/.keras или SavedModel.
-    Возвращает (model, is_saved_model, size_mb).
+    Загружает .h5/.keras, SavedModel или .tflite модель.
+    Возвращает (model, model_type, size_mb).
     """
-    if path.endswith(('.h5', '.keras')):
+    global _interpreter, _input_det, _output_det, _scale_in, _zp_in, _scale_out, _zp_out, _input_shape
+    
+    if path.endswith('.tflite'):
+        # Загрузка TFLite модели
+        _interpreter = tf.lite.Interpreter(model_path=path)
+        _interpreter.allocate_tensors()
+        
+        _input_det = _interpreter.get_input_details()[0]
+        _output_det = _interpreter.get_output_details()[0]
+        
+        _scale_in, _zp_in = _input_det["quantization"]
+        _scale_out, _zp_out = _output_det["quantization"]
+        _input_shape = _input_det["shape"]  # [1, H, W, C]
+        
+        sz = os.path.getsize(path)
+        return _interpreter, "tflite", sz / (1024**2)
+    
+    elif path.endswith(('.h5', '.keras')):
         m = tf.keras.models.load_model(path, compile=False)
         sz = os.path.getsize(path)
-        return m, False, sz / (1024**2)
-    m = tf.saved_model.load(path)
-    sz = sum(os.path.getsize(os.path.join(r, f))
-             for r, _, files in os.walk(path) for f in files)
-    return m, True, sz / (1024**2)
+        return m, "tf", sz / (1024**2)
+    
+    else:
+        # Предполагаем, что это SavedModel
+        m = tf.saved_model.load(path)
+        sz = sum(os.path.getsize(os.path.join(r, f))
+                for r, _, files in os.walk(path) for f in files)
+        return m, "tf", sz / (1024**2)
 
-def create_predictor(model, is_saved_model):
+def create_predictor(model, model_type):
     """
-    Если Keras/H5 — просто model.predict.
-    Если SavedModel — берём сигнатуру serving_default.
-    Вход — np.ndarray H×W×C, выход — np.ndarray с «логитами» или вероятностями.
+    Создает функцию для предсказания в зависимости от типа модели.
     """
-    if not is_saved_model:
-        return lambda x: model.predict(x.astype('float32')/255., verbose=0)
-    sig = model.signatures["serving_default"]
-    inp_name = list(sig.structured_input_signature[1].keys())[0]
-    out_key = list(sig.structured_outputs.keys())[0]
-    def predict_fn(x):
-        t = tf.constant(x.astype('float32')/255.)
-        return sig(**{inp_name: t})[out_key].numpy()
-    return predict_fn
+    if model_type == "tflite":
+        # Используем точно такую же функцию, как в вашем блокноте
+        def predict_fn(patches):
+            """
+            patches: H×W×C или B×H×W×C (float32)
+            возвращает: B×H×W×n_classes (float32)
+            """
+            global _interpreter, _input_det, _output_det, _scale_in, _zp_in, _scale_out, _zp_out, _input_shape
+            
+            x = np.asarray(patches, dtype=np.float32)
+            if x.ndim == 3:
+                x = x[None, ...]  # 1×H×W×C
 
-def load_model(model_path='saved_model_dir'):
+            # Препроцесс и нормировка
+            x = preprocess_input(x) / 255.0
+
+            # Квантование входа (если требуется)
+            if _scale_in:
+                x = (x / _scale_in + _zp_in).astype(_input_det["dtype"])
+            else:
+                x = x.astype(_input_det["dtype"])
+
+            # Подгоняем batch_size и инференсим
+            batch = x.shape[0]
+            _interpreter.resize_tensor_input(
+                _input_det["index"], [batch] + list(_input_shape[1:])
+            )
+            _interpreter.allocate_tensors()
+            _interpreter.set_tensor(_input_det["index"], x)
+            _interpreter.invoke()
+
+            # Считываем и деквантуем выход
+            y = _interpreter.get_tensor(_output_det["index"]).astype(np.float32)
+            if _scale_out:
+                y = (y - _zp_out) * _scale_out
+
+            return y  # (batch, H, W, n_classes)
+            
+        return predict_fn
+    
+    elif model_type == "tf":
+        # Для TensorFlow моделей
+        if hasattr(model, 'predict'):  # Keras model
+            return lambda x: model.predict(preprocess_input(x.astype('float32'))/255., verbose=0)
+        else:  # SavedModel
+            sig = model.signatures["serving_default"]
+            inp_name = list(sig.structured_input_signature[1].keys())[0]
+            out_key = list(sig.structured_outputs.keys())[0]
+            def predict_fn(x):
+                x_prep = preprocess_input(x.astype('float32'))/255.
+                t = tf.constant(x_prep)
+                return sig(**{inp_name: t})[out_key].numpy()
+            return predict_fn
+
+def load_model(model_path='model_f16.tflite'):
     """Загрузка модели из указанного пути"""
-    global model, is_saved_model, predictor_function
+    global model, model_type, predictor_function
     if model is None:
-        model, is_saved_model, _ = load_model_generic(model_path)
-        predictor_function = create_predictor(model, is_saved_model)
+        model, model_type, size_mb = load_model_generic(model_path)
+        predictor_function = create_predictor(model, model_type)
+        print(f"Загружена модель типа {model_type}, размер: {size_mb:.2f} МБ")
     return model, predictor_function
 
 def predict_img_with_smooth_windowing(input_img, window_size, subdivisions, nb_classes, pred_func):
@@ -195,52 +278,25 @@ def predict_img_with_smooth_windowing(input_img, window_size, subdivisions, nb_c
     return merged_result[:input_img.shape[0], :input_img.shape[1]]
 
 def label_to_rgb(predicted_image):
-    """Преобразование меток классов в RGB изображение"""
-    # Здание
-    Building = '#3C1098'.lstrip('#')
-    Building = np.array(tuple(int(Building[i:i+2], 16) for i in (0, 2, 4)))
+    # RGB цвета для всех классов
+    colors = np.array([
+        [60, 16, 152],    # Здание (#3C1098)
+        [132, 41, 246],   # Земля (#8429F6)
+        [110, 193, 228],  # Дорога (#6EC1E4)
+        [254, 221, 58],   # Растительность (#FEDD3A)
+        [226, 169, 41],   # Вода (#E2A929)
+        [155, 155, 155]   # Неразмеченный (#9B9B9B)
+    ], dtype=np.uint8)
 
-    # Земля
-    Land = '#8429F6'.lstrip('#')
-    Land = np.array(tuple(int(Land[i:i+2], 16) for i in (0, 2, 4)))
+    rgb_image = colors[predicted_image]
 
-    # Дорога
-    Road = '#6EC1E4'.lstrip('#')
-    Road = np.array(tuple(int(Road[i:i+2], 16) for i in (0, 2, 4)))
-
-    # Растительность
-    Vegetation = 'FEDD3A'.lstrip('#')
-    Vegetation = np.array(tuple(int(Vegetation[i:i+2], 16) for i in (0, 2, 4)))
-
-    # Вода
-    Water = 'E2A929'.lstrip('#')
-    Water = np.array(tuple(int(Water[i:i+2], 16) for i in (0, 2, 4)))
-
-    # Неразмеченный
-    Unlabeled = '#9B9B9B'.lstrip('#')
-    Unlabeled = np.array(tuple(int(Unlabeled[i:i+2], 16) for i in (0, 2, 4)))
-
-    # Создание пустого изображения с тремя каналами (RGB)
-    segmented_img = np.empty((predicted_image.shape[0], predicted_image.shape[1], 3))
-
-    # Заполнение изображения соответствующими цветами в зависимости от меток классов
-    segmented_img[(predicted_image == 0)] = Building
-    segmented_img[(predicted_image == 1)] = Land
-    segmented_img[(predicted_image == 2)] = Road
-    segmented_img[(predicted_image == 3)] = Vegetation
-    segmented_img[(predicted_image == 4)] = Water
-    segmented_img[(predicted_image == 5)] = Unlabeled
-
-    # Преобразование типа данных в uint8 для корректного отображения изображения
-    segmented_img = segmented_img.astype(np.uint8)
-
-    return segmented_img
+    return rgb_image
 
 @app.on_event("startup")
 async def startup_event():
     """Загружаем модель при запуске сервера"""
     load_model()
-    print("Модель успешно загружена")
+    print(f"Модель успешно загружена (тип: {model_type})")
 
 @app.get("/")
 def read_root():
@@ -256,6 +312,9 @@ async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisi
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
+        # Преобразуем в RGB, как в блокноте
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
         # Получение модели и предиктора
         _, predictor = load_model()
         
@@ -264,7 +323,7 @@ async def predict(file: UploadFile = File(...), patch_size: int = 256, subdivisi
         
         # Предсказание с плавными переходами
         predictions_smooth = predict_img_with_smooth_windowing(
-            img,  # Передаем необработанное изображение, предобработка внутри predictor
+            img,
             window_size=patch_size,
             subdivisions=subdivisions,
             nb_classes=n_classes,

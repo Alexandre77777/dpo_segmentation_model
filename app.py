@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import requests
 from PIL import Image
@@ -43,18 +42,14 @@ st.sidebar.markdown("""
 
 uploaded_file = st.file_uploader("Выберите спутниковый снимок...", type=["jpg", "jpeg", "png"])
 
-col1, col2 = st.columns(2)
-
+# Moved the button and processing logic above the columns
+result_image = None
 if uploaded_file is not None:
-    # Отображаем загруженное изображение
-    image = Image.open(uploaded_file)
-    col1.header("Исходное изображение")
-    col1.image(image, caption="Загруженное изображение", use_column_width=True)
-    
-    # Обрабатываем изображение по клику на кнопку
+    # Moved button above columns
     process_button = st.button("Сегментировать изображение")
     
     if process_button:
+        # Spinner now appears above columns
         with st.spinner("Обработка..."):
             # Подготавливаем файл для запроса
             files = {"file": ("image.jpg", uploaded_file.getvalue(), "image/jpeg")}
@@ -65,21 +60,30 @@ if uploaded_file is not None:
                 response = requests.post(f"{BACKEND_URL}/predict/", files=files, params=params)
                 response.raise_for_status()
                 
-                # Отображаем результат
+                # Store result image for display in the column below
                 result_image = Image.open(io.BytesIO(response.content))
-                col2.header("Результат сегментации")
-                col2.image(result_image, caption="Маска сегментации", use_column_width=True)
-                
-                # Добавляем кнопку для скачивания результата
-                st.markdown(
-                    get_image_download_link(result_image, "segmentation_result.png", "Скачать результат сегментации"),
-                    unsafe_allow_html=True
-                )
                 
             except requests.exceptions.RequestException as e:
                 st.error(f"Ошибка соединения с бэкендом: {str(e)}")
             except Exception as e:
                 st.error(f"Произошла ошибка: {str(e)}")
+
+col1, col2 = st.columns(2)
+
+if uploaded_file is not None:
+    # Отображаем загруженное изображение
+    image = Image.open(uploaded_file)
+    col1.header("Исходное изображение")
+    col1.image(image, caption="Загруженное изображение", use_column_width=True)
+    
+    # Display result if we have one
+    if result_image is not None:
+        # Создаем две колонки для заголовка и кнопки скачивания
+        header_col, button_col = col2.columns([0.7, 0.3])
+        header_col.header("Результат сегментации")
+        button_col.markdown(get_image_download_link(result_image, "segmentation_result.png", "⬇️ Скачать"), unsafe_allow_html=True)
+        
+        col2.image(result_image, caption="Маска сегментации", use_column_width=True)
 else:
     st.info("Загрузите изображение, чтобы начать")
 
