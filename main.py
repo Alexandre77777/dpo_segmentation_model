@@ -5,9 +5,9 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
 
-from config import APP_TITLE, CORS_CONFIG, DEFAULT_PATCH_SIZE, DEFAULT_SUBDIVISIONS, DEFAULT_NUM_CLASSES
+from config import APP_TITLE, CORS_CONFIG, DEFAULT_PATCH_SIZE, DEFAULT_SUBDIVISIONS, DEFAULT_NUM_CLASSES, USE_SIMPLE_ALGORITHM
 from utils.model_loader import load_model
-from utils.prediction import predict_img_with_smooth_windowing
+from utils.prediction import predict_img_with_smooth_windowing, predict_img_simple_tiling
 from utils.image_processing import load_image_from_bytes, label_to_rgb, create_response_image
 
 # Инициализация FastAPI приложения
@@ -45,14 +45,26 @@ async def predict(
         # Получение модели и предиктора
         _, predictor = load_model()
         
-        # Предсказание с плавными переходами
-        predictions_smooth = predict_img_with_smooth_windowing(
-            img,
-            window_size=patch_size,
-            subdivisions=subdivisions,
-            nb_classes=DEFAULT_NUM_CLASSES,
-            pred_func=predictor
-        )
+        # Выбор алгоритма предсказания
+        if USE_SIMPLE_ALGORITHM:
+            # Оптимизированный алгоритм (быстрее и меньше памяти)
+            overlap = 0 if subdivisions == 1 else patch_size // subdivisions
+            predictions_smooth = predict_img_simple_tiling(
+                img,
+                window_size=patch_size,
+                overlap=overlap,
+                nb_classes=DEFAULT_NUM_CLASSES,
+                pred_func=predictor
+            )
+        else:
+            # Оригинальный алгоритм с улучшениями
+            predictions_smooth = predict_img_with_smooth_windowing(
+                img,
+                window_size=patch_size,
+                subdivisions=subdivisions,
+                nb_classes=DEFAULT_NUM_CLASSES,
+                pred_func=predictor
+            )
         
         # Получение итогового предсказания
         final_prediction = np.argmax(predictions_smooth, axis=2)

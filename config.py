@@ -1,5 +1,4 @@
 # config.py
-import os
 
 # Настройки модели
 BACKBONE = 'efficientnetb1'
@@ -31,3 +30,6 @@ SEGMENTATION_COLORS = [
 DEFAULT_PATCH_SIZE = 256
 DEFAULT_SUBDIVISIONS = 2
 DEFAULT_NUM_CLASSES = 6
+
+# Выбор алгоритма предсказания
+USE_SIMPLE_ALGORITHM = True  # По умолчанию используем оптимизированную версию
