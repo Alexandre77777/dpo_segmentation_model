@@ -43,12 +43,12 @@
 
 | Класс | Цвет | Hex |
 |-------|------|-----|
-| 🏠 Здания | ![#3C1098](https://via.placeholder.com/15/3C1098/000000?text=+) | `#3C1098` |
-| 🌍 Земля | ![#8429F6](https://via.placeholder.com/15/8429F6/000000?text=+) | `#8429F6` |
-| 🛣️ Дороги | ![#6EC1E4](https://via.placeholder.com/15/6EC1E4/000000?text=+) | `#6EC1E4` |
-| 🌳 Растительность | ![#FEDD3A](https://via.placeholder.com/15/FEDD3A/000000?text=+) | `#FEDD3A` |
-| 💧 Вода | ![#E2A929](https://via.placeholder.com/15/E2A929/000000?text=+) | `#E2A929` |
-| ⬜ Неразмеченное | ![#9B9B9B](https://via.placeholder.com/15/9B9B9B/000000?text=+) | `#9B9B9B` |
+| 🏠 Здания | ![#3C1098](https://placehold.co/15x15/3C1098/3C1098.png) | `#3C1098` |
+| 🌍 Земля | ![#8429F6](https://placehold.co/15x15/8429F6/8429F6.png) | `#8429F6` |
+| 🛣️ Дороги | ![#6EC1E4](https://placehold.co/15x15/6EC1E4/6EC1E4.png) | `#6EC1E4` |
+| 🌳 Растительность | ![#FEDD3A](https://placehold.co/15x15/FEDD3A/FEDD3A.png) | `#FEDD3A` |
+| 💧 Вода | ![#E2A929](https://placehold.co/15x15/E2A929/E2A929.png) | `#E2A929` |
+| ⬜ Неразмеченное | ![#9B9B9B](https://placehold.co/15x15/9B9B9B/9B9B9B.png) | `#9B9B9B` |
 
 </td>
 </tr>
