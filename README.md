@@ -8,21 +8,36 @@
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.21.0-FF4B4B.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-<h3>🌍 Веб-приложение для автоматической семантической сегментации спутниковых снимков</h3>
+<h3>🚀 Веб-приложение для автоматической семантической сегментации спутниковых снимков</h3>
 
-[Демо](#-демонстрация) • [Установка](#-быстрый-старт) • [API](#-api-документация) 
+[**🔗 ПОПРОБОВАТЬ ПРИЛОЖЕНИЕ**](https://dpo-segmentation-model.streamlit.app/) • [Установка](#-быстрый-старт) • [API](#-api-документация) 
 
 </div>
 
 ---
 
-## 📸 Демонстрация
+## 🎥 Демонстрация
 
 <div align="center">
   <img src="example_segmentation.gif?text=Демонстрация+сегментации" alt="Demo" width="80%">
 </div>
 
-## 🎯 Возможности
+## 🌐 Онлайн-версия
+
+<div align="center">
+
+### 👉 [**ОТКРЫТЬ ПРИЛОЖЕНИЕ**](https://dpo-segmentation-model.streamlit.app/) 👈
+
+| 🔗 Компонент | URL | ⚡ Статус |
+|--------------|-----|----------|
+| **Frontend** | [dpo-segmentation-model.streamlit.app](https://dpo-segmentation-model.streamlit.app/) | ![Streamlit](https://img.shields.io/badge/Live-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white) |
+| **Backend API** | [dpo-segmentation-model.onrender.com](https://dpo-segmentation-model.onrender.com) | ![Render](https://img.shields.io/badge/Live-46E3B7?style=for-the-badge&logo=render&logoColor=white) |
+
+</div>
+
+> ⚠️ **Важно:** Первый запуск может занять до 2-3 минут из-за холодного старта сервера. Используйте изображения с разрешением не более **512x512 px** из-за ограничений бесплатного хостинга. Для работы с большими изображениями рекомендуется локальное развертывание.
+
+## 🚀 Возможности
 
 <table>
 <tr>
