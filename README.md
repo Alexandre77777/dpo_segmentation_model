@@ -19,7 +19,7 @@
 ## 📸 Демонстрация
 
 <div align="center">
-  <img src="https://via.placeholder.com/800x400.png?text=Демонстрация+сегментации" alt="Demo" width="80%">
+  <img src="example_segmentation.gif?text=Демонстрация+сегментации" alt="Demo" width="80%">
 </div>
 
 ## 🎯 Возможности
